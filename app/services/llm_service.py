@@ -10,12 +10,12 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-SYSTEM_PROMPT = """
+EXTRACTION_SYSTEM_PROMPT = """
 Ты эксперт по анализу государственных закупок и тендерной документации.
 
 Тебе передается фрагмент тендерной документации.
-Извлеки только информацию, которая подтверждается предоставленным текстом.
 
+Извлеки только информацию, которая подтверждается предоставленным текстом.
 Нужно определить:
 1. Сумму контракта.
 2. Валюту.
@@ -37,23 +37,28 @@ SYSTEM_PROMPT = """
 - Если информация неоднозначна, не делай предположение.
 """
 
-AGGREGATION_PROMPT = """
-Ты — финальный эксперт по проверке тендерной документации.
-Тебе переданы структурированные результаты анализа нескольких фрагментов одного PDF.
-Сформируй ЕДИНЫЙ итоговый объект TenderSummary.
+AGGREGATION_SYSTEM_PROMPT = """
+Ты — финальный эксперт по анализу государственных закупок.
+Тебе переданы структурированные результаты анализа отдельных фрагментов одного
+тендерного документа. Сформируй один консолидированный результат.
 
-Правила при конфликте данных:
-- Для суммы контракта выбирай именно НМЦК/цену контракта, а не цену отдельного этапа,
-  позиции, единицы товара, обеспечения или штрафа.
-- Для срока выбирай срок исполнения самого контракта/обязательства, а не срок действия
-  заявки, банковской гарантии или отдельного этапа, если это не единственный срок.
-- Не объединяй противоречащие значения в одно поле. Выбирай значение, которое явно
-  относится к контракту. Если определить нельзя — верни значение "Не указана" или
+Критически важно:
+- Используй только сведения из переданных результатов.
+- Не придумывай отсутствующие факты.
+- При конфликте числовых значений для суммы выбирай значение, явно обозначенное
+  как НМЦК, начальная (максимальная) цена контракта или цена всего контракта.
+  Стоимости отдельных этапов, позиций, единиц товара и лимиты не считай суммой
+  контракта.
+- Для срока выбирай срок исполнения всего контракта, а не отдельного этапа,
+  если это явно указано. Если однозначно определить общий срок нельзя, верни
   "Не указан".
-- Удали дубли требований и штрафов, сохрани юридически важные условия, проценты,
+- Не объединяй разные валюты и не угадывай валюту.
+- Удали дубликаты требований и штрафов, сохранив конкретные условия, проценты,
   суммы и основания начисления.
-- Не придумывай отсутствующие сведения.
-- Итоговое summary должно быть кратким и полезным для заказчика/исполнителя.
+- Если два значения действительно противоречат друг другу и нельзя определить
+  правильное, верни "Не указана" для суммы или "Не указан" для срока.
+- summary должен кратко описывать предмет и ключевые условия закупки без
+  добавления неподтвержденных сведений.
 """
 
 
@@ -81,8 +86,8 @@ def _summary_json_schema() -> dict:
     }
 
 
-def _call_openai(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary:
-    """Analyze text using OpenAI structured output."""
+def _call_openai(text: str, system_prompt: str) -> TenderSummary:
+    """Run one structured-output request against OpenAI."""
     settings = get_settings()
     if not settings.openai_api_key:
         raise LLMConfigurationError("OPENAI_API_KEY не настроен.")
@@ -114,8 +119,8 @@ def _call_openai(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary
         raise LLMProcessingError(f"Ошибка OpenAI API: {exc}") from exc
 
 
-def _call_ollama(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary:
-    """Analyze text using Ollama structured output."""
+def _call_ollama(text: str, system_prompt: str) -> TenderSummary:
+    """Run one structured-output request against Ollama."""
     settings = get_settings()
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
     payload = {
@@ -148,8 +153,8 @@ def _call_ollama(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary
         ) from exc
 
 
-def _call_provider(text: str, system_prompt: str) -> TenderSummary:
-    """Call the configured LLM provider with a custom system prompt."""
+def _call_llm(text: str, system_prompt: str) -> TenderSummary:
+    """Dispatch one structured request to the configured LLM provider."""
     settings = get_settings()
     provider = settings.llm_provider.lower().strip()
     if provider == "openai":
@@ -163,29 +168,27 @@ def _call_provider(text: str, system_prompt: str) -> TenderSummary:
 
 def analyze_text(text: str) -> TenderSummary:
     """Analyze one document chunk using the configured LLM provider."""
-    return _call_provider(text, SYSTEM_PROMPT)
+    return _call_llm(text, EXTRACTION_SYSTEM_PROMPT)
 
 
 def aggregate_summaries(summaries: list[TenderSummary]) -> TenderSummary:
-    """Use a second LLM pass to reconcile facts extracted from all chunks."""
+    """Use a second LLM pass to reconcile chunk-level results conservatively."""
     if not summaries:
-        raise LLMProcessingError("Нет результатов для финальной агрегации.")
+        raise LLMProcessingError("LLM не вернула результатов для агрегации.")
 
     payload = json.dumps(
         [item.model_dump(mode="json") for item in summaries],
         ensure_ascii=False,
         indent=2,
     )
-    prompt = (
-        "Ниже приведены результаты анализа фрагментов одного тендерного документа.\n"
-        "Сведи их в один проверенный итоговый результат.\n\n"
-        f"{payload}"
+    return _call_llm(
+        "Консолидируй следующие результаты анализа одного документа:\n\n" + payload,
+        AGGREGATION_SYSTEM_PROMPT,
     )
-    return _call_provider(prompt, AGGREGATION_PROMPT)
 
 
 def merge_summaries(summaries: list[TenderSummary]) -> TenderSummary:
-    """Backward-compatible deterministic merge for callers/tests."""
+    """Backward-compatible deterministic fallback merge for local callers."""
     if not summaries:
         raise LLMProcessingError("LLM не вернула результатов.")
 
@@ -202,19 +205,9 @@ def merge_summaries(summaries: list[TenderSummary]) -> TenderSummary:
                 result.append(normalized)
         return result
 
-    amounts = [
-        item.contract_amount
-        for item in summaries
-        if item.contract_amount != "Не указана"
-    ]
-    currencies = [
-        item.currency for item in summaries if item.currency != "Не указана"
-    ]
-    periods = [
-        item.execution_period
-        for item in summaries
-        if item.execution_period != "Не указан"
-    ]
+    amounts = [item.contract_amount for item in summaries if item.contract_amount != "Не указана"]
+    currencies = [item.currency for item in summaries if item.currency != "Не указана"]
+    periods = [item.execution_period for item in summaries if item.execution_period != "Не указан"]
     requirements = [value for item in summaries for value in item.key_requirements]
     penalties = [value for item in summaries for value in item.penalties]
     summaries_text = [item.summary.strip() for item in summaries if item.summary.strip()]
