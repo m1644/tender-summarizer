@@ -170,7 +170,7 @@ cp .env.example .env
 
 ```bash
 brew install tesseract
-tbrew install tesseract-lang
+brew install tesseract-lang
 brew install poppler
 ```
 
