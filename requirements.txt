@@ -1,0 +1,16 @@
+fastapi>=0.116,<1.0
+uvicorn[standard]>=0.35,<1.0
+python-multipart>=0.0.20,<1.0
+pydantic>=2.11,<3.0
+pydantic-settings>=2.10,<3.0
+pypdf>=6.0,<7.0
+openai>=1.99,<2.0
+httpx>=0.28,<1.0
+pytesseract>=0.3.13,<1.0
+Pillow>=11.0,<13.0
+pdf2image>=1.17,<2.0
+python-dotenv>=1.1,<2.0
+pytest>=8.4,<9.0
+pytest-asyncio>=1.1,<2.0
+pytest-cov>=6.2,<7.0
+ruff>=0.12,<1.0
