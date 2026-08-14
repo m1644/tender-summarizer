@@ -53,13 +53,27 @@ async def test_full_pipeline_uses_all_chunks_and_final_aggregator(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oversized_document_is_rejected_before_llm(monkeypatch):
-    monkeypatch.setattr(
-        summarizer_service,
-        "extract_text_from_pdf",
-        lambda _: "x" * 500_001,
-    )
+async def test_large_document_is_processed_without_truncation(monkeypatch):
+    """Large PDFs must reach the chunker/LLM instead of being silently truncated."""
+    text = "x" * 500_001
+    chunks_seen: list[str] = []
+
+    monkeypatch.setattr(summarizer_service, "extract_text_from_pdf", lambda _: text)
     monkeypatch.setattr(summarizer_service, "has_extractable_text", lambda _: True)
 
-    with pytest.raises(ValueError, match="слишком много текста"):
-        await summarizer_service.summarize_tender(b"%PDF-test")
+    def fake_analyze(chunk: str) -> TenderSummary:
+        chunks_seen.append(chunk)
+        return make_summary()
+
+    monkeypatch.setattr(summarizer_service, "analyze_text", fake_analyze)
+    monkeypatch.setattr(
+        summarizer_service,
+        "aggregate_summaries",
+        lambda summaries: make_summary(),
+    )
+
+    result = await summarizer_service.summarize_tender(b"%PDF-test")
+
+    assert result.contract_amount == "Не указана"
+    assert len(chunks_seen) > 1
+    assert sum(len(chunk) for chunk in chunks_seen) >= len(text)
