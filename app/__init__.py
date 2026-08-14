@@ -1,0 +1,1 @@
+"""Tender Documentation Summarizer application."""
