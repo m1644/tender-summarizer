@@ -57,7 +57,7 @@ async def test_full_pipeline_uses_all_chunks_and_final_aggregation(monkeypatch):
         "НМЦК 15 000 000 рублей. Срок исполнения 90 дней. "
         "Исполнитель должен иметь опыт аналогичных работ. "
         "За просрочку начисляется пеня 0,1 процента за каждый день. "
-    ) * 20
+    ) * 120
     chunk_results = [
         TenderSummary(
             contract_amount="Не указана",
@@ -83,7 +83,8 @@ async def test_full_pipeline_uses_all_chunks_and_final_aggregation(monkeypatch):
     monkeypatch.setattr(
         summarizer_service,
         "analyze_text",
-        lambda text: analyzed_chunks.append(text) or chunk_results[len(analyzed_chunks) - 1],
+        lambda text: analyzed_chunks.append(text)
+        or chunk_results[(len(analyzed_chunks) - 1) % len(chunk_results)],
     )
 
     final_result = TenderSummary(
