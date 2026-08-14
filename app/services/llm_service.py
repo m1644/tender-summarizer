@@ -14,8 +14,8 @@ SYSTEM_PROMPT = """
 Ты эксперт по анализу государственных закупок и тендерной документации.
 
 Тебе передается фрагмент тендерной документации.
-
 Извлеки только информацию, которая подтверждается предоставленным текстом.
+
 Нужно определить:
 1. Сумму контракта.
 2. Валюту.
@@ -35,6 +35,25 @@ SYSTEM_PROMPT = """
 - Сохраняй денежные суммы, проценты и условия начисления пеней.
 - Если штрафы не обнаружены, верни пустой список.
 - Если информация неоднозначна, не делай предположение.
+"""
+
+AGGREGATION_PROMPT = """
+Ты — финальный эксперт по проверке тендерной документации.
+Тебе переданы структурированные результаты анализа нескольких фрагментов одного PDF.
+Сформируй ЕДИНЫЙ итоговый объект TenderSummary.
+
+Правила при конфликте данных:
+- Для суммы контракта выбирай именно НМЦК/цену контракта, а не цену отдельного этапа,
+  позиции, единицы товара, обеспечения или штрафа.
+- Для срока выбирай срок исполнения самого контракта/обязательства, а не срок действия
+  заявки, банковской гарантии или отдельного этапа, если это не единственный срок.
+- Не объединяй противоречащие значения в одно поле. Выбирай значение, которое явно
+  относится к контракту. Если определить нельзя — верни значение "Не указана" или
+  "Не указан".
+- Удали дубли требований и штрафов, сохрани юридически важные условия, проценты,
+  суммы и основания начисления.
+- Не придумывай отсутствующие сведения.
+- Итоговое summary должно быть кратким и полезным для заказчика/исполнителя.
 """
 
 
@@ -62,8 +81,8 @@ def _summary_json_schema() -> dict:
     }
 
 
-def _call_openai(text: str) -> TenderSummary:
-    """Analyze a text chunk using OpenAI structured output."""
+def _call_openai(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary:
+    """Analyze text using OpenAI structured output."""
     settings = get_settings()
     if not settings.openai_api_key:
         raise LLMConfigurationError("OPENAI_API_KEY не настроен.")
@@ -77,14 +96,8 @@ def _call_openai(text: str) -> TenderSummary:
             model=settings.openai_model,
             temperature=settings.llm_temperature,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Проанализируй следующий фрагмент документа:\n\n"
-                        f"{text}"
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
             ],
             response_format=TenderSummary,
         )
@@ -101,22 +114,16 @@ def _call_openai(text: str) -> TenderSummary:
         raise LLMProcessingError(f"Ошибка OpenAI API: {exc}") from exc
 
 
-def _call_ollama(text: str) -> TenderSummary:
-    """Analyze a text chunk using Ollama structured output."""
+def _call_ollama(text: str, system_prompt: str = SYSTEM_PROMPT) -> TenderSummary:
+    """Analyze text using Ollama structured output."""
     settings = get_settings()
     url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
     payload = {
         "model": settings.ollama_model,
         "stream": False,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Проанализируй следующий фрагмент документа:\n\n"
-                    f"{text}"
-                ),
-            },
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
         ],
         "format": _summary_json_schema(),
         "options": {"temperature": settings.llm_temperature},
@@ -141,21 +148,44 @@ def _call_ollama(text: str) -> TenderSummary:
         ) from exc
 
 
-def analyze_text(text: str) -> TenderSummary:
-    """Analyze text using configured LLM provider."""
+def _call_provider(text: str, system_prompt: str) -> TenderSummary:
+    """Call the configured LLM provider with a custom system prompt."""
     settings = get_settings()
     provider = settings.llm_provider.lower().strip()
     if provider == "openai":
-        return _call_openai(text)
+        return _call_openai(text, system_prompt)
     if provider == "ollama":
-        return _call_ollama(text)
+        return _call_ollama(text, system_prompt)
     raise LLMConfigurationError(
         f"Неизвестный LLM_PROVIDER: {settings.llm_provider}"
     )
 
 
+def analyze_text(text: str) -> TenderSummary:
+    """Analyze one document chunk using the configured LLM provider."""
+    return _call_provider(text, SYSTEM_PROMPT)
+
+
+def aggregate_summaries(summaries: list[TenderSummary]) -> TenderSummary:
+    """Use a second LLM pass to reconcile facts extracted from all chunks."""
+    if not summaries:
+        raise LLMProcessingError("Нет результатов для финальной агрегации.")
+
+    payload = json.dumps(
+        [item.model_dump(mode="json") for item in summaries],
+        ensure_ascii=False,
+        indent=2,
+    )
+    prompt = (
+        "Ниже приведены результаты анализа фрагментов одного тендерного документа.\n"
+        "Сведи их в один проверенный итоговый результат.\n\n"
+        f"{payload}"
+    )
+    return _call_provider(prompt, AGGREGATION_PROMPT)
+
+
 def merge_summaries(summaries: list[TenderSummary]) -> TenderSummary:
-    """Merge chunk summaries and remove duplicate list items."""
+    """Backward-compatible deterministic merge for callers/tests."""
     if not summaries:
         raise LLMProcessingError("LLM не вернула результатов.")
 
@@ -178,24 +208,16 @@ def merge_summaries(summaries: list[TenderSummary]) -> TenderSummary:
         if item.contract_amount != "Не указана"
     ]
     currencies = [
-        item.currency
-        for item in summaries
-        if item.currency != "Не указана"
+        item.currency for item in summaries if item.currency != "Не указана"
     ]
     periods = [
         item.execution_period
         for item in summaries
         if item.execution_period != "Не указан"
     ]
-    requirements: list[str] = []
-    penalties: list[str] = []
-    summaries_text: list[str] = []
-
-    for item in summaries:
-        requirements.extend(item.key_requirements)
-        penalties.extend(item.penalties)
-        if item.summary.strip():
-            summaries_text.append(item.summary.strip())
+    requirements = [value for item in summaries for value in item.key_requirements]
+    penalties = [value for item in summaries for value in item.penalties]
+    summaries_text = [item.summary.strip() for item in summaries if item.summary.strip()]
 
     return TenderSummary(
         contract_amount=amounts[0] if amounts else "Не указана",
