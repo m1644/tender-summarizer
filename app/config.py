@@ -8,11 +8,10 @@ class Settings(BaseSettings):
     """Application configuration."""
 
     app_name: str = "Tender Documentation Summarizer"
-    app_version: str = "2.0.0"
+    app_version: str = "2.1.0"
     debug: bool = False
 
     max_file_size_mb: int = Field(default=20, ge=1, le=100)
-    max_text_chars: int = Field(default=500_000, ge=10_000)
     chunk_size: int = Field(default=12_000, ge=1_000)
     chunk_overlap: int = Field(default=1_000, ge=0)
 
