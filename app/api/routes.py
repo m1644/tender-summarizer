@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.config import get_settings
@@ -54,7 +56,9 @@ async def health() -> HealthResponse:
     status_code=status.HTTP_200_OK,
     tags=["tenders"],
 )
-async def summarize(file: UploadFile = File(...)) -> TenderSummary:
+async def summarize(
+    file: Annotated[UploadFile, File(...)],
+) -> TenderSummary:
     settings = get_settings()
 
     if not file.filename:
